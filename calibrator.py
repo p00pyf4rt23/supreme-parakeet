@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from scipy.optimize import minimize
+from datetime import datetime, timedelta
 
 # --- Hand-Tunable Settings ---
 ALLOWED_TICKERS_FILE = "allowed_stocks.txt"
@@ -77,30 +78,27 @@ def method_of_moments(r, dt):
     mu = (mean_r + lam*(math.exp(m+0.5*delta2)-1)*dt)/dt
     return mu, sigma, lam, m, math.sqrt(delta2)
 
+# New helper to find Monday
+def get_week_start():
+    today = datetime.today()
+    return today - timedelta(days=today.weekday())
+
 def run_calibration():
     tickers = load_tickers(ALLOWED_TICKERS_FILE)
     prices = fetch_prices(tickers, HIST_DAYS)
 
+    week_start = get_week_start().strftime("%m-%d-%Y")
+
     # Prepare file and write header
     with open(PARAM_FILE, 'w') as f:
+        f.write(f"Week of {week_start}\n")
         header = "ticker,mu,sigma,lambda,m,delta\n"
         f.write(header)
 
-    # Load previous params (tolerate errors)
-    try:
-        old_df = pd.read_csv(PARAM_FILE).set_index('ticker')
-    except Exception:
-        old_df = pd.DataFrame()
-
     start = time.time()
     for t in tickers:
-        # default or old
-        if t in old_df.index:
-            mu, sigma, lam, m, delta = old_df.loc[t, ['mu','sigma','lambda','m','delta']].values
-        else:
-            mu, sigma, lam, m, delta = 0.0, 1e-6, 1e-6, 0.0, 1e-6
+        mu, sigma, lam, m, delta = 0.0, 1e-6, 1e-6, 0.0, 1e-6
 
-        # calibrate if possible
         if t in prices.columns:
             r = log_returns(prices[t])
             if len(r) >= MIN_RETURNS:
@@ -109,18 +107,14 @@ def run_calibration():
                 except Exception as e:
                     print(f"[DEBUG] MLE failed for {t}: {e}")
                     new = method_of_moments(r, DT)
-                # smooth update
+
                 def blend(nv, ov):
                     if ov and abs(nv-ov)/abs(ov) < CHANGE_THRESHOLD:
                         return ov
                     return SMOOTHING_ALPHA*nv + (1-SMOOTHING_ALPHA)*ov
-                mu    = blend(new[0], mu)
-                sigma = blend(new[1], sigma)
-                lam   = blend(new[2], lam)
-                m     = blend(new[3], m)
-                delta = blend(new[4], delta)
 
-        # write line immediately
+                mu, sigma, lam, m, delta = map(blend, new, [mu, sigma, lam, m, delta])
+
         line = f"{t},{mu},{sigma},{lam},{m},{delta}\n"
         with open(PARAM_FILE, 'a') as f:
             f.write(line)
